@@ -16,4 +16,4 @@ node index.js
 
 ## Website
 
-Visit [nexacoin.io](https://nexacoin.io) for more information.
+Visit [[nexacoin.io](https://nexacoin.io)](https://nexacoin-af273.web.app/) for more information.
