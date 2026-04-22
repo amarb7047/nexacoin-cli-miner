@@ -5,6 +5,9 @@ const ora = require('ora');
 const open = require('open');
 const figlet = require('figlet');
 const boxen = require('boxen');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 const { initializeApp } = require('firebase/app');
 const { getFirestore, doc, getDoc, updateDoc, increment, onSnapshot } = require('firebase/firestore');
 
@@ -16,6 +19,30 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
+
+const SESSION_FILE = path.join(os.homedir(), '.nexacoin-session.json');
+
+function saveSession(uid) {
+  fs.writeFileSync(SESSION_FILE, JSON.stringify({ uid }));
+}
+
+function getSession() {
+  if (fs.existsSync(SESSION_FILE)) {
+    try {
+      const data = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+      return data.uid;
+    } catch (e) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function clearSession() {
+  if (fs.existsSync(SESSION_FILE)) {
+    fs.unlinkSync(SESSION_FILE);
+  }
+}
 
 function showHeader() {
   console.clear();
@@ -29,6 +56,17 @@ const generateSessionId = () => Math.random().toString(36).substring(2, 15);
 
 async function main() {
   showHeader();
+
+  const savedUid = getSession();
+  if (savedUid) {
+    const userDoc = await getDoc(doc(db, 'users', savedUid));
+    if (userDoc.exists()) {
+      console.log(chalk.green('✓ Session restored automatically!\n'));
+      return await miningDashboard(savedUid);
+    } else {
+      clearSession();
+    }
+  }
 
   const { action } = await inquirer.prompt([
     {
@@ -73,6 +111,7 @@ async function main() {
         spinner.succeed(chalk.green('Authentication successful! 🎉'));
         const uid = snap.data().uid;
         
+        saveSession(uid);
         await miningDashboard(uid);
       }
     });
@@ -94,21 +133,19 @@ async function startAutoMiner(uid, data) {
   let localBalance = data.balance;
   let blocksMined = 0;
 
-  // Real-time hashing logs every 2 seconds
   setInterval(() => {
     const hashRate = (Math.random() * 800 + 200).toFixed(2);
     const nonce = Math.floor(Math.random() * 999999999);
     console.log(chalk.gray(`[${new Date().toLocaleTimeString()}] `) + chalk.cyanBright(`⚙️  Hashing... Rate: ${hashRate} MH/s | Nonce: 0x${nonce.toString(16)}`));
   }, 2000);
 
-  // Auto-claim every 30 seconds
   setInterval(async () => {
     try {
-      const reward = 2; // Auto claim 2 NXC per 30 seconds
+      const reward = 5; 
       await updateDoc(doc(db, 'users', uid), {
         balance: increment(reward),
         totalMined: increment(reward),
-        xp: increment(1)
+        xp: increment(2)
       });
       localBalance += reward;
       blocksMined++;
@@ -122,7 +159,7 @@ async function startAutoMiner(uid, data) {
     } catch (e) {
       console.log(chalk.red(`[Error] Failed to claim block: ${e.message}`));
     }
-  }, 30000);
+  }, 15000);
 }
 
 async function miningDashboard(uid) {
@@ -157,6 +194,7 @@ async function miningDashboard(uid) {
   ]);
 
   if (action.includes('Logout')) {
+    clearSession();
     console.log(chalk.gray('\nLogged out successfully.\n'));
     process.exit(0);
   }
